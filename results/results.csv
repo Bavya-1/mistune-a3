@@ -1,6 +1,11 @@
-gh_issue,experiment_issue,run_url,stage_reached,outcome,reason,pr_url,hidden_tests_passed
-3,1,https://github.com/Bavya-1/mistune-a3/actions/runs/45002050172,1-spec,stopped,groq output_parse_failed,,
-4,2,https://github.com/Bavya-1/mistune-a3/actions/runs/45002183777,1-spec,stopped,groq tool_use_failed,,
-5,3,https://github.com/Bavya-1/mistune-a3/actions/runs/44999496778,2-design,stopped,groq tool_use_failed,,
-6,4,https://github.com/Bavya-1/mistune-a3/actions/runs/45000655278,2-design,stopped,groq output_parse_failed,,
-7,5,https://github.com/Bavya-1/mistune-a3/actions/runs/44999306142,1-spec,stopped,spec check failed (AC5 no concrete example),,
+kind,gh_issue,experiment_issue,run_url,stage_reached,outcome,reason,pr_url,hidden_tests_passed
+agent_run,3,1,https://github.com/Bavya-1/mistune-a3/actions/runs/45002050172,1-spec,stopped,groq output_parse_failed,none,n/a (no code produced; baseline 1/4)
+agent_run,4,2,https://github.com/Bavya-1/mistune-a3/actions/runs/45002183777,1-spec,stopped,groq tool_use_failed,none,n/a (no code produced; baseline 2/4)
+agent_run,5,3,https://github.com/Bavya-1/mistune-a3/actions/runs/44999496778,2-design,stopped,groq tool_use_failed,none,n/a (no code produced; baseline 2/4)
+agent_run,6,4,https://github.com/Bavya-1/mistune-a3/actions/runs/45000655278,2-design,stopped,groq output_parse_failed,none,n/a (no code produced; baseline 1/4)
+agent_run,7,5,https://github.com/Bavya-1/mistune-a3/actions/runs/44999306142,1-spec,stopped,spec check failed (AC5 no concrete example),none,n/a (no code produced; baseline 1/4)
+seeded_review,6,4,https://github.com/Bavya-1/mistune-a3/actions/runs/45015757076,6-review,approve (expected approve),correct: control PR,https://github.com/Bavya-1/mistune-a3/pull/18,4/4
+seeded_review,6,4,https://github.com/Bavya-1/mistune-a3/actions/runs/45017333385,6-review,code_issue (expected code_issue) but review rejected as invalid,flaw (mailto gets target) not named,https://github.com/Bavya-1/mistune-a3/pull/19,3/4
+seeded_review,6,4,https://github.com/Bavya-1/mistune-a3/actions/runs/45018829592,6-review,code_issue (expected code_issue) but review rejected as invalid,flaw (no test added) not named,https://github.com/Bavya-1/mistune-a3/pull/20,4/4
+seeded_review,6,4,https://github.com/Bavya-1/mistune-a3/actions/runs/45021157375,6-review,code_issue (expected code_issue) but review rejected as invalid,flaw (on by default) found: 20 failing tests,https://github.com/Bavya-1/mistune-a3/pull/21,3/4
+seeded_review,6,4,https://github.com/Bavya-1/mistune-a3/actions/runs/45022924870,6-review,no review saved,cause not visible on the PR page,https://github.com/Bavya-1/mistune-a3/pull/22,4/4
