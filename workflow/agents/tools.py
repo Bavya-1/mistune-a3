@@ -252,7 +252,8 @@ SCHEMAS: Dict[str, Dict[str, Any]] = {
 
 # allow-lists per agent (ADR-005 table)
 AGENT_TOOLS = {
-    "planner": ["read_file", "list_files", "search", "write_artifact"],
+    "planner": ["read_file", "list_files", "search", "write_artifact"],        # stage 2 (design)
+    "planner_spec": ["write_artifact"],                                        # stage 1: no exploring, just write
     "builder": ["read_file", "list_files", "search", "edit_file", "write_file", "run_command"],
     "reviewer": ["read_file", "list_files", "search", "run_command", "write_artifact"],
 }

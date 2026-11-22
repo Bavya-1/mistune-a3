@@ -101,7 +101,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
     issue = json.loads(read(Path(args.issue)))
     budget = Budget(*PLANNER_BUDGET)
     client = make_client("planner", budget, artifacts, "gemini", "gemini-2.5-flash-lite")
-    tools = ToolSet("planner", Workspace(str(repo), writable=[], artifact_dir=str(artifacts)))
+    workspace = Workspace(str(repo), writable=[], artifact_dir=str(artifacts))
+    spec_tools = ToolSet("planner_spec", workspace)  # stage 1 only saves the spec
+    tools = ToolSet("planner", workspace)            # stage 2 may read code to name real functions
 
     # ---- stage 1: requirements (the A1 skill). On a re-plan the approved spec is kept.
     skill = read(WORKFLOW / "SKILL.md")
@@ -118,8 +120,12 @@ def cmd_plan(args: argparse.Namespace) -> int:
     for attempt in range(1, PLAN_ATTEMPTS + 1):
         if args.replan:
             break  # spec.md is kept; breaking also skips the for-else below
-        task = wrap_issue(issue) + "\n\nWrite spec.md now and save it with write_artifact." + feedback
-        res = run_agent(client, skill, task, tools, max_steps=6)
+        task = (
+            wrap_issue(issue) + "\n\nWrite spec.md now and save it with write_artifact in your first reply. "
+            "You cannot read the repository in this stage: describe current behaviour only as far as the "
+            "issue shows it, and list anything you could not check under Assumptions." + feedback
+        )
+        res = run_agent(client, skill, task, spec_tools, max_steps=3, stop_after="write_artifact")
         state.event("1-requirements", "attempt", n=attempt, agent=transcript_summary(res), error=res.error)
         spec_text = read(artifacts / "spec.md")
         check = check_spec(spec_text) if spec_text else None
@@ -149,7 +155,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
             "Here is the approved spec.md (trusted):\n\n" + spec_text +
             "\n\nWrite design.md now and save it with write_artifact." + feedback
         )
-        res = run_agent(client, design_prompt, task, tools, max_steps=10)
+        res = run_agent(client, design_prompt, task, tools, max_steps=7, stop_after="write_artifact")
         state.event("2-design", "attempt", n=attempt, agent=transcript_summary(res), error=res.error)
         design_text = read(artifacts / "design.md")
         if not design_text:
