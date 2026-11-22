@@ -148,6 +148,11 @@ class LLMClient:
         self._cfg = cfg
         self._pacer = Pacer(tpm=cfg["tpm"], rpm=cfg["rpm"])
 
+    @property
+    def tpm(self) -> int:
+        """The provider's tokens-per-minute limit; callers size their prompts from it."""
+        return int(self._cfg["tpm"])
+
     # ------------------------------------------------------------------
     def chat(
         self,
