@@ -20,7 +20,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 HERE = Path(__file__).resolve().parent
 WORKFLOW = HERE.parent
@@ -207,6 +207,12 @@ def verify(repo: Path, ac_ids: List[str]) -> Dict[str, Any]:
         reasons.append(f"changed files outside src/ and tests/: {bad}")
     if run([sys.executable, "-c", "import mistune"], repo).returncode != 0:
         reasons.append("the package does not import")
+    # The project's own CI lints every pull request, so a change that fails lint would fail stage 5.
+    # Catch it here, where the builder can still fix it ("the code builds", stage 3).
+    for name, cmd in (("ruff", [sys.executable, "-m", "ruff", "check", "."]), ("mypy", [sys.executable, "-m", "mypy"])):
+        lint = run(cmd, repo)
+        if lint.returncode != 0:
+            reasons.append(f"{name} fails (the project's CI runs it): " + (lint.stdout + lint.stderr).strip()[-600:])
     tests_text = added_test_text(diff).lower()
     for ac in ac_ids:
         if ac.lower() not in tests_text:
@@ -292,7 +298,7 @@ def replan_or_stop(artifacts: Path, state: State, last: Dict[str, Any], why: str
 
 
 def write_test_report(artifacts: Path, ok: bool, last: Dict[str, Any], attempts: int, why: str = "") -> None:
-    lines = [f"# Test report", "", f"Result: {'PASSED' if ok else 'FAILED'} after {attempts} attempt(s)."]
+    lines = ["# Test report", "", f"Result: {'PASSED' if ok else 'FAILED'} after {attempts} attempt(s)."]
     if why:
         lines.append(f"Reason: {why}")
     if last["reasons"] and not ok:
