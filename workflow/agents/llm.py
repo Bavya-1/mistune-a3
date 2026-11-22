@@ -187,7 +187,12 @@ class LLMClient:
             req = urllib.request.Request(
                 self._cfg["url"],
                 data=payload,
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                    # Groq sits behind Cloudflare, which rejects Python's default user agent (HTTP 403, code 1010).
+                    "User-Agent": "autose-agent/1.0",
+                },
                 method="POST",
             )
             try:
