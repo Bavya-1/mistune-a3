@@ -156,17 +156,58 @@ def cmd_pr(args: argparse.Namespace) -> int:
     (artifacts / "pr_link.txt").write_text(pr_url + "\n", encoding="utf-8")
     print("opened", pr_url)
 
-    started = time.time()
-    ci = wait_for_ci(repo, branch, started)
-    (artifacts / "ci.json").write_text(json.dumps(ci, indent=2), encoding="utf-8")
-    ok = ci["conclusion"] == "success"
+    (artifacts / "branch.txt").write_text(branch + "\n", encoding="utf-8")
+    ok = run_ci(repo, branch, pr_url, artifacts, "ci.json", pr_md)
+    return 0 if ok else 2
+
+
+def run_ci(repo: str, branch: str, pr_url: str, artifacts: Path, result_name: str, pr_md: Optional[Path] = None) -> bool:
+    """Start the project's CI on the branch, wait, record the result and comment on the PR."""
+    ci = wait_for_ci(repo, branch, time.time())
+    (artifacts / result_name).write_text(json.dumps(ci, indent=2), encoding="utf-8")
     note = f"CI on `{branch}`: **{ci['conclusion']}** {ci['url']}"
-    with pr_md.open("a", encoding="utf-8") as f:
-        f.write("\n" + note + "\n")
+    if pr_md is not None:
+        with pr_md.open("a", encoding="utf-8") as f:
+            f.write("\n" + note + "\n")
     sh(["gh", "pr", "comment", pr_url, "--repo", repo, "--body", note], check=False)
-    if not ok:
+    if ci["conclusion"] != "success":
         print("CI did not pass:", ci)
+        return False
+    return True
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    """A fix round: add the builder's new edits as one more commit on the same pull request branch."""
+    repo = target_repo()
+    artifacts = Path(args.artifacts)
+    branch = f"autose/issue-{args.issue_number}-{args.run_id}"
+    patch = artifacts / "diff_round.patch"
+    pr_url = read(artifacts / "pr_link.txt").strip()
+    if not read(patch).strip() or not pr_url:
+        print("no round patch or no pull request link")
         return 2
+    sh(["git", "config", "user.name", "autose-bot"])
+    sh(["git", "config", "user.email", "autose-bot@users.noreply.github.com"])
+    sh(["git", "apply", "--index", str(patch.resolve())])
+    sh(["git", "commit", "-m", f"AutoSE: fixes after review round {args.round} (issue #{args.issue_number})"])
+    sh(["git", "push", "origin", branch])
+    ok = run_ci(repo, branch, pr_url, artifacts, f"ci_round{args.round}.json")
+    return 0 if ok else 2
+
+
+def cmd_reviews(args: argparse.Namespace) -> int:
+    """Post each review on the pull request so anyone can follow it there."""
+    repo = target_repo()
+    artifacts = Path(args.artifacts)
+    pr_url = read(artifacts / "pr_link.txt").strip()
+    if not pr_url:
+        print("no pull request to post on")
+        return 0
+    for review in sorted(artifacts.rglob("review_round*.md")):  # one sub-folder per round
+        number = re.sub(r"\D", "", review.stem)
+        body = artifacts / f"comment_{review.stem}.md"
+        body.write_text(f"### Independent review, round {number}\n\n" + read(review), encoding="utf-8")
+        sh(["gh", "pr", "comment", pr_url, "--repo", repo, "--body-file", str(body)], check=False)
     return 0
 
 
@@ -194,17 +235,48 @@ def cmd_comment(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_issue_for_pr(args: argparse.Namespace) -> int:
+    """Save the issue text a pull request is for, as issue.json (data, never a shell command).
+
+    The issue is the first '#<number>' in the pull request description. If there is none, the
+    pull request's own title and description stand in for it."""
+    repo = target_repo()
+    event = json.loads(read(Path(os.environ["GITHUB_EVENT_PATH"])))
+    pr = event["issue"]  # a pull request is an issue in the issue_comment event
+    body = pr.get("body") or ""
+    refs = [n for n in re.findall(r"#(\d+)", body) if int(n) != pr["number"]]
+    issue = {"number": pr["number"], "title": pr.get("title") or "", "body": body}
+    if refs:
+        res = sh(["gh", "issue", "view", refs[0], "--repo", repo, "--json", "number,title,body"], check=False)
+        try:
+            found = json.loads(res.stdout)
+            issue = {"number": found["number"], "title": found.get("title") or "", "body": found.get("body") or ""}
+        except (ValueError, KeyError):
+            print(f"could not read issue #{refs[0]}; using the pull request text")
+    out = Path(args.artifacts)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "issue.json").write_text(json.dumps(issue), encoding="utf-8")
+    print("issue for review: #", issue["number"])
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("pr", "comment"):
+    for name in ("pr", "update", "comment", "reviews", "issue-for-pr"):
         p = sub.add_parser(name)
         p.add_argument("--artifacts", required=True)
-        p.add_argument("--issue-number", required=True)
-        if name == "pr":
+        p.add_argument("--issue-number", default="")
+        if name in ("pr", "update"):
             p.add_argument("--run-id", required=True)
+        if name == "update":
+            p.add_argument("--round", default="2")
     args = ap.parse_args()
-    return cmd_pr(args) if args.cmd == "pr" else cmd_comment(args)
+    handlers = {
+        "pr": cmd_pr, "update": cmd_update, "comment": cmd_comment,
+        "reviews": cmd_reviews, "issue-for-pr": cmd_issue_for_pr,
+    }
+    return handlers[args.cmd](args)
 
 
 if __name__ == "__main__":

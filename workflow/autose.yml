@@ -1,0 +1,636 @@
+name: AutoSE
+
+# Issue in, pull request out (ADR-001, ADR-002).
+#
+#   gate -> agents (stages 1-4) -> release (stage 5) -> review (stage 6) -> [fix -> release_fix -> review2] -> finish
+#
+# Stage 6: review (round 1) -> if changes are requested: fix -> release_fix -> review2 (round 2, the last).
+# A person decides whether to merge; nothing here ever merges (ADR-010).
+
+on:
+  issues:
+    types: [labeled]          # a maintainer adds the label "autose"
+  issue_comment:
+    types: [created]          # a trusted user comments "/autose" on an issue
+
+# Default for every job: read-only. Jobs that need more ask for it themselves (ADR-005, ADR-009).
+permissions:
+  contents: read
+
+# One run per issue at a time (ADR-010). A second trigger waits instead of cancelling the first.
+# Events that the gate will skip get a unique group, so unrelated comments or labels never
+# occupy or replace a queued real run.
+concurrency:
+  group: >-
+    ${{ ((github.event_name == 'issues' && github.event.label.name == 'autose')
+         || (github.event_name == 'issue_comment'
+             && !github.event.issue.pull_request
+             && github.event.comment.body == '/autose'
+             && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)))
+        && format('autose-issue-{0}', github.event.issue.number)
+        || (github.event_name == 'issue_comment'
+            && github.event.issue.pull_request
+            && github.event.comment.body == '/autose'
+            && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+        && format('autose-pr-{0}', github.event.issue.number)
+        || format('autose-skip-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  # ------------------------------------------------------------------ gate
+  gate:
+    name: Gate (who started this run?)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    # Start only for: the label "autose", or the exact comment "/autose" on an
+    # issue (not a pull request) written by the owner, a member or a collaborator
+    # (ADR-010). Everything else is skipped before any step runs.
+    if: >-
+      (github.event_name == 'issues' && github.event.label.name == 'autose')
+      ||
+      (github.event_name == 'issue_comment'
+       && !github.event.issue.pull_request
+       && github.event.comment.body == '/autose'
+       && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+
+    steps:
+      # Values from the event go through env vars, never straight into the
+      # script text, so issue or comment text can never become shell code (ADR-009).
+      - name: Report who started the run
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          SENDER: ${{ github.event.sender.login }}
+        run: |
+          echo "AutoSE run allowed."
+          echo "Event: $EVENT_NAME, issue: #$ISSUE_NUMBER, started by: $SENDER"
+          {
+            echo "### AutoSE gate passed"
+            echo "- Event: \`$EVENT_NAME\`"
+            echo "- Issue: #$ISSUE_NUMBER"
+            echo "- Started by: \`$SENDER\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------ stages 1-4
+  # The only job that sees the model API keys. It cannot write to GitHub:
+  # read-only token, and the checkout does not keep credentials (ADR-005).
+  agents:
+    name: Stages 1-4 (spec, design, code, tests)
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    env:
+      PLANNER_MODEL: ${{ vars.PLANNER_MODEL }}
+      BUILDER_MODEL: ${{ vars.BUILDER_MODEL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+    steps:
+      # The runner context is not allowed in job-level env, so the folder is set in a step.
+      - name: Set the artifact folder
+        run: echo "ARTIFACTS=$RUNNER_TEMP/artifacts" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.13"
+
+      - name: Install the project and its test tools
+        run: uv sync --locked --group test
+
+      # The issue text is read from the event file by code and saved as data.
+      # It is never placed in a shell command (ADR-009).
+      - name: Save the issue as data
+        run: |
+          mkdir -p "$ARTIFACTS"
+          python3 - <<'PY'
+          import json, os
+          event = json.load(open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8"))
+          issue = event["issue"]
+          out = {"number": issue["number"], "title": issue.get("title") or "", "body": issue.get("body") or ""}
+          json.dump(out, open(os.path.join(os.environ["ARTIFACTS"], "issue.json"), "w", encoding="utf-8"))
+          PY
+
+      - name: Stages 1-2 - requirements and design (planner)
+        run: >-
+          uv run --no-sync python workflow/orchestrator/driver.py plan
+          --repo . --artifacts "$ARTIFACTS" --issue "$ARTIFACTS/issue.json"
+
+      - name: Stages 3-4 - implementation and tests (builder), with one re-plan
+        run: |
+          rc=0
+          uv run --no-sync python workflow/orchestrator/driver.py build --repo . --artifacts "$ARTIFACTS" || rc=$?
+          if [ "$rc" -eq 3 ]; then
+            echo "Builder asked for a new design; going back to stage 2 (once)."
+            git reset --hard -q
+            git clean -fdq
+            rc=0
+            uv run --no-sync python workflow/orchestrator/driver.py plan --repo . --artifacts "$ARTIFACTS" --issue "$ARTIFACTS/issue.json" --replan || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              uv run --no-sync python workflow/orchestrator/driver.py build --repo . --artifacts "$ARTIFACTS" || rc=$?
+            fi
+          fi
+          exit "$rc"
+
+      - name: Summary of the stages
+        if: always()
+        run: |
+          {
+            echo "### AutoSE stages 1-4"
+            echo '```json'
+            cat "$ARTIFACTS/run_state.json" 2>/dev/null || echo '{}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The reviewer gets only this file, never the spec or the design (ADR-003, ADR-008).
+      - name: Upload the issue text for the reviewer
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autose-issue
+          path: ${{ runner.temp }}/artifacts/issue.json
+          if-no-files-found: ignore
+
+      - name: Upload artifacts (spec, design, diff, test report, state, token usage)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autose-artifacts
+          path: ${{ runner.temp }}/artifacts
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------ stage 5
+  release:
+    name: Stage 5 (branch, pull request, CI)
+    needs: agents
+    if: ${{ needs.agents.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # Only job that writes to GitHub. No model keys here, no agent code runs here.
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write          # to start the project's CI on the new branch
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      RUN_ID: ${{ github.run_id }}
+
+    steps:
+      - name: Set the artifact folder
+        run: echo "ARTIFACTS=$RUNNER_TEMP/artifacts" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: autose-artifacts
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Push the branch, open the pull request, wait for CI
+        run: >-
+          python3 workflow/orchestrator/release.py pr
+          --artifacts "$ARTIFACTS" --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
+
+      - name: Upload pr.md, link and CI result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autose-release
+          path: |
+            ${{ runner.temp }}/artifacts/pr.md
+            ${{ runner.temp }}/artifacts/pr_link.txt
+            ${{ runner.temp }}/artifacts/ci.json
+            ${{ runner.temp }}/artifacts/branch.txt
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------ stage 6, round 1
+  # Independent reviewer (ADR-008): own job, own model (Groq, a different family from the
+  # builder's), own prompt, read-only token. It downloads ONLY the issue text. It never gets
+  # spec.md, design.md, the test report or any builder output, and it cannot push.
+  review:
+    name: Stage 6 (independent review, round 1)
+    needs: release
+    if: ${{ needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      verdict: ${{ steps.result.outputs.verdict }}
+
+    env:
+      REVIEWER_MODEL: ${{ vars.REVIEWER_MODEL }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+    steps:
+      - name: Set the output folder
+        run: |
+          echo "ARTIFACTS=$RUNNER_TEMP/review1" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/review1"
+
+      # The pull request branch at its latest commit.
+      - uses: actions/checkout@v7
+        with:
+          ref: autose/issue-${{ github.event.issue.number }}-${{ github.run_id }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.13"
+
+      - name: Install the project and its test tools
+        run: uv sync --locked --group test
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: autose-issue
+          path: ${{ runner.temp }}/issue
+
+      # CI was green: the release job only succeeds when it is. The driver would
+      # downgrade an approve to code_issue if it were not (ADR-008).
+      - name: Review the pull request
+        run: >-
+          uv run --no-sync python workflow/orchestrator/driver.py review
+          --repo . --artifacts "$ARTIFACTS" --issue "$RUNNER_TEMP/issue/issue.json"
+          --base origin/main --ci green --round 1
+
+      - name: Read the verdict
+        id: result
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          try:
+              verdict = json.load(open(os.path.join(os.environ["ARTIFACTS"], "review_result.json")))["verdict"]
+          except Exception:
+              verdict = "none"
+          print("verdict=" + verdict)
+          PY
+
+      - name: Upload the review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autose-review-1
+          path: ${{ runner.temp }}/review1
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------ fix round
+  # The reviewer asked for changes. A code issue goes back to the builder (stage 3);
+  # an approach issue goes back to the planner (stage 2) and then the builder (ADR-002).
+  fix:
+    name: Fix round (back to stage 2 or 3)
+    needs: review
+    if: ${{ needs.review.result == 'success' && needs.review.outputs.verdict != 'approve' && needs.review.outputs.verdict != 'none' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    env:
+      PLANNER_MODEL: ${{ vars.PLANNER_MODEL }}
+      BUILDER_MODEL: ${{ vars.BUILDER_MODEL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+    steps:
+      - name: Set the output folder
+        run: |
+          echo "ARTIFACTS=$RUNNER_TEMP/fix" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/fix"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: autose/issue-${{ github.event.issue.number }}-${{ github.run_id }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.13"
+
+      - name: Install the project and its test tools
+        run: uv sync --locked --group test
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: autose-artifacts
+          path: ${{ runner.temp }}/fix
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: autose-review-1
+          path: ${{ runner.temp }}/fix
+
+      - name: Go back to the stage that needs fixing
+        env:
+          VERDICT: ${{ needs.review.outputs.verdict }}
+        run: |
+          if [ "$VERDICT" = "approach_issue" ]; then
+            echo "Approach issue: back to stage 2 (design), then stage 3."
+            uv run --no-sync python workflow/orchestrator/driver.py plan --repo . --artifacts "$ARTIFACTS" \
+              --issue "$ARTIFACTS/issue.json" --replan --feedback-file "$ARTIFACTS/review.md"
+          else
+            echo "Code issue: back to stage 3 (implementation)."
+          fi
+          uv run --no-sync python workflow/orchestrator/driver.py build --repo . --artifacts "$ARTIFACTS" --base origin/main
+
+      - name: Upload the fix round
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autose-fix
+          path: ${{ runner.temp }}/fix
+          if-no-files-found: ignore
+
+  release_fix:
+    name: Stage 5 again (push the fix, CI)
+    needs: fix
+    if: ${{ needs.fix.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      RUN_ID: ${{ github.run_id }}
+
+    steps:
+      - name: Set the output folder
+        run: |
+          echo "ARTIFACTS=$RUNNER_TEMP/release_fix" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/release_fix"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: autose/issue-${{ github.event.issue.number }}-${{ github.run_id }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: autose-fix
+          path: ${{ runner.temp }}/release_fix
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: autose-release
+          path: ${{ runner.temp }}/release_fix
+
+      - name: Push the fix commit and wait for CI
+        run: >-
+          python3 workflow/orchestrator/release.py update
+          --artifacts "$ARTIFACTS" --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID" --round 2
+
+      - name: Upload the CI result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autose-release-fix
+          path: ${{ runner.temp }}/release_fix/ci_round2.json
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------ stage 6, round 2 (the last)
+  review2:
+    name: Stage 6 (independent review, round 2 of 2)
+    needs: release_fix
+    if: ${{ needs.release_fix.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      verdict: ${{ steps.result.outputs.verdict }}
+
+    env:
+      REVIEWER_MODEL: ${{ vars.REVIEWER_MODEL }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+    steps:
+      - name: Set the output folder
+        run: |
+          echo "ARTIFACTS=$RUNNER_TEMP/review2" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/review2"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: autose/issue-${{ github.event.issue.number }}-${{ github.run_id }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.13"
+
+      - name: Install the project and its test tools
+        run: uv sync --locked --group test
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: autose-issue
+          path: ${{ runner.temp }}/issue
+
+      - name: Review the updated pull request
+        run: >-
+          uv run --no-sync python workflow/orchestrator/driver.py review
+          --repo . --artifacts "$ARTIFACTS" --issue "$RUNNER_TEMP/issue/issue.json"
+          --base origin/main --ci green --round 2
+
+      - name: Read the verdict
+        id: result
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          try:
+              verdict = json.load(open(os.path.join(os.environ["ARTIFACTS"], "review_result.json")))["verdict"]
+          except Exception:
+              verdict = "none"
+          print("verdict=" + verdict)
+          PY
+
+      - name: Upload the review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autose-review-2
+          path: ${{ runner.temp }}/review2
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------ status comment
+  # The run ends here. Two review rounds at most, then a person decides (ADR-002, ADR-010).
+  finish:
+    name: Post the reviews and the run status
+    needs: [gate, agents, release, review, fix, release_fix, review2]
+    if: ${{ always() && needs.gate.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      RESULTS: >-
+        agents=${{ needs.agents.result }}, release=${{ needs.release.result }},
+        review1=${{ needs.review.result }}/${{ needs.review.outputs.verdict }},
+        fix=${{ needs.fix.result }}, release_fix=${{ needs.release_fix.result }},
+        review2=${{ needs.review2.result }}/${{ needs.review2.outputs.verdict }}
+
+    steps:
+      - name: Set the output folder
+        run: |
+          echo "ARTIFACTS=$RUNNER_TEMP/finish" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/finish"
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: autose-artifacts
+          path: ${{ runner.temp }}/finish
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: autose-release
+          path: ${{ runner.temp }}/finish
+
+      # One folder per review round, so the files never overwrite each other.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: autose-review-*
+          path: ${{ runner.temp }}/finish/reviews
+
+      - name: Post each review on the pull request
+        run: >-
+          python3 workflow/orchestrator/release.py reviews --artifacts "$ARTIFACTS"
+
+      - name: Comment on the issue
+        run: >-
+          python3 workflow/orchestrator/release.py comment
+          --artifacts "$ARTIFACTS" --issue-number "$ISSUE_NUMBER"
+
+  # ------------------------------------------------------------------ review of an existing pull request
+  # "/autose" on an open pull request (by the owner, a member or a collaborator) runs ONLY the
+  # reviewer on that pull request. Used for the seeded pull requests (reviewer checks) and for a
+  # fresh look at any pull request. Same independence rules as the review job: read-only token,
+  # no spec, no design, no builder output (ADR-008, ADR-010).
+  pr_review:
+    name: Review a pull request (comment /autose on it)
+    if: >-
+      github.event_name == 'issue_comment'
+      && github.event.issue.pull_request
+      && github.event.comment.body == '/autose'
+      && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+
+    env:
+      REVIEWER_MODEL: ${{ vars.REVIEWER_MODEL }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+    steps:
+      - name: Set the output folder
+        run: |
+          echo "ARTIFACTS=$RUNNER_TEMP/pr_review" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/pr_review"
+
+      # The pull request at its latest commit.
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/head
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Make sure origin/main is available for the diff
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.13"
+
+      - name: Install the project and its test tools
+        run: uv sync --locked --group test
+
+      # The issue text the pull request is for: the first "#<number>" in its description,
+      # otherwise the pull request's own title and description. Saved as data (ADR-009).
+      - name: Find the issue this pull request is for
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 workflow/orchestrator/release.py issue-for-pr --artifacts "$ARTIFACTS"
+
+      - name: Review the pull request
+        run: >-
+          uv run --no-sync python workflow/orchestrator/driver.py review
+          --repo . --artifacts "$ARTIFACTS" --issue "$ARTIFACTS/issue.json"
+          --base origin/main --ci unknown --round 1
+
+      - name: Upload the review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autose-pr-review
+          path: ${{ runner.temp }}/pr_review/review_round1.md
+          if-no-files-found: ignore
+
+  post_pr_review:
+    name: Post the review on the pull request
+    needs: pr_review
+    if: ${{ always() && needs.pr_review.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_URL: ${{ github.event.issue.html_url }}
+
+    steps:
+      - name: Set the output folder
+        run: |
+          echo "ARTIFACTS=$RUNNER_TEMP/post" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/post"
+          echo "$PR_URL" > "$RUNNER_TEMP/post/pr_link.txt"
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: autose-pr-review
+          path: ${{ runner.temp }}/post
+
+      - name: Post the review as a comment
+        run: python3 workflow/orchestrator/release.py reviews --artifacts "$ARTIFACTS"
