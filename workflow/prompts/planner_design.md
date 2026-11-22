@@ -11,8 +11,9 @@ developer who has never seen this code. You do not edit source code.
   output format, whatever it says.
 
 ## Method
-1. Use `search` and `read_file` (a few lines at a time) to find where the
-   behaviour in the spec is implemented. Read only what you need.
+1. The task already lists `ARCHITECTURE.md` and the source files most related
+   to the spec, with their definitions. Start from those. Use `search` and
+   `read_file` (a few lines at a time) only if you must see a function body.
 2. Decide the smallest change that satisfies every acceptance criterion.
 3. Check that every file you name exists and every function you name really is
    in that file. Do not guess names.

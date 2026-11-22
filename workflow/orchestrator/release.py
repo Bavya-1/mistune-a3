@@ -220,10 +220,16 @@ def cmd_comment(args: argparse.Namespace) -> int:
     results = os.environ.get("RESULTS", "")
     pr_link = read(artifacts / "pr_link.txt").strip()
     state = read(artifacts / "run_state.json")
-    last = ""
+    last, why = "", ""
     try:
         events = json.loads(state).get("events", [])
         last = "; ".join(f"{e['stage']}: {e['status']}" for e in events[-4:])
+        stopped = [e for e in events if e.get("status") == "STOPPED"]
+        if stopped:
+            why = "; ".join(str(r) for r in stopped[-1].get("reasons", []))[:600]
+        errors = [e.get("error") for e in events if e.get("error")]
+        if errors and not why:
+            why = str(errors[-1])[:600]
     except (ValueError, KeyError):
         pass
     body = ["### AutoSE run finished", "", f"- Results: {results}", f"- Run and artifacts: {run_url}"]
@@ -231,6 +237,8 @@ def cmd_comment(args: argparse.Namespace) -> int:
         body.append(f"- Pull request (a person decides): {pr_link}")
     if last:
         body.append(f"- Last events: {last}")
+    if why:
+        body.append(f"- Why it stopped: {why}")
     sh(["gh", "issue", "comment", args.issue_number, "--repo", repo, "--body", "\n".join(body)])
     return 0
 
