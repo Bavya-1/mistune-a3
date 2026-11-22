@@ -48,7 +48,10 @@ def run_agent(
     task: str,
     tools: ToolSet,
     max_steps: int = 20,
+    stop_after: str = "",
 ) -> AgentResult:
+    """Run the tool loop. If `stop_after` names a tool (e.g. write_artifact), the loop ends as soon as
+    that tool has succeeded, which saves the extra model call that would only say "done"."""
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": task},
@@ -88,6 +91,9 @@ def run_agent(
             output = tools.call(name, fn.get("arguments", "{}"))
             result.transcript.append({"step": result.steps, "tool": name, "failed": output.startswith("error:")})
             messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": output})
+            if stop_after and name == stop_after and not output.startswith("error:"):
+                result.final_text = f"({stop_after} succeeded)"
+                return result
 
     result.stopped, result.error = "max_steps", f"no final answer after {max_steps} steps"
     return result
