@@ -1,0 +1,230 @@
+name: AutoSE
+
+# Issue in, pull request out (ADR-001, ADR-002).
+#
+#   gate -> agents (stages 1-4: plan, build, test) -> release (stage 5) -> finish (status comment)
+#
+# The reviewer job (stage 6) is added in the next piece.
+# A person decides whether to merge; nothing here ever merges (ADR-010).
+
+on:
+  issues:
+    types: [labeled]          # a maintainer adds the label "autose"
+  issue_comment:
+    types: [created]          # a trusted user comments "/autose" on an issue
+
+# Default for every job: read-only. Jobs that need more ask for it themselves (ADR-005, ADR-009).
+permissions:
+  contents: read
+
+# One run per issue at a time (ADR-010). A second trigger waits instead of cancelling the first.
+# Events that the gate will skip get a unique group, so unrelated comments or labels never
+# occupy or replace a queued real run.
+concurrency:
+  group: >-
+    ${{ ((github.event_name == 'issues' && github.event.label.name == 'autose')
+         || (github.event_name == 'issue_comment'
+             && !github.event.issue.pull_request
+             && github.event.comment.body == '/autose'
+             && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)))
+        && format('autose-issue-{0}', github.event.issue.number)
+        || format('autose-skip-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  # ------------------------------------------------------------------ gate
+  gate:
+    name: Gate (who started this run?)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    # Start only for: the label "autose", or the exact comment "/autose" on an
+    # issue (not a pull request) written by the owner, a member or a collaborator
+    # (ADR-010). Everything else is skipped before any step runs.
+    if: >-
+      (github.event_name == 'issues' && github.event.label.name == 'autose')
+      ||
+      (github.event_name == 'issue_comment'
+       && !github.event.issue.pull_request
+       && github.event.comment.body == '/autose'
+       && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+
+    steps:
+      # Values from the event go through env vars, never straight into the
+      # script text, so issue or comment text can never become shell code (ADR-009).
+      - name: Report who started the run
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          SENDER: ${{ github.event.sender.login }}
+        run: |
+          echo "AutoSE run allowed."
+          echo "Event: $EVENT_NAME, issue: #$ISSUE_NUMBER, started by: $SENDER"
+          {
+            echo "### AutoSE gate passed"
+            echo "- Event: \`$EVENT_NAME\`"
+            echo "- Issue: #$ISSUE_NUMBER"
+            echo "- Started by: \`$SENDER\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------ stages 1-4
+  # The only job that sees the model API keys. It cannot write to GitHub:
+  # read-only token, and the checkout does not keep credentials (ADR-005).
+  agents:
+    name: Stages 1-4 (spec, design, code, tests)
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    env:
+      ARTIFACTS: ${{ runner.temp }}/artifacts
+      PLANNER_MODEL: ${{ vars.PLANNER_MODEL }}
+      BUILDER_MODEL: ${{ vars.BUILDER_MODEL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.13"
+
+      - name: Install the project and its test tools
+        run: uv sync --locked --group test
+
+      # The issue text is read from the event file by code and saved as data.
+      # It is never placed in a shell command (ADR-009).
+      - name: Save the issue as data
+        run: |
+          mkdir -p "$ARTIFACTS"
+          python3 - <<'PY'
+          import json, os
+          event = json.load(open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8"))
+          issue = event["issue"]
+          out = {"number": issue["number"], "title": issue.get("title") or "", "body": issue.get("body") or ""}
+          json.dump(out, open(os.path.join(os.environ["ARTIFACTS"], "issue.json"), "w", encoding="utf-8"))
+          PY
+
+      - name: Stages 1-2 - requirements and design (planner)
+        run: >-
+          uv run --no-sync python workflow/orchestrator/driver.py plan
+          --repo . --artifacts "$ARTIFACTS" --issue "$ARTIFACTS/issue.json"
+
+      - name: Stages 3-4 - implementation and tests (builder), with one re-plan
+        run: |
+          rc=0
+          uv run --no-sync python workflow/orchestrator/driver.py build --repo . --artifacts "$ARTIFACTS" || rc=$?
+          if [ "$rc" -eq 3 ]; then
+            echo "Builder asked for a new design; going back to stage 2 (once)."
+            git reset --hard -q
+            git clean -fdq
+            rc=0
+            uv run --no-sync python workflow/orchestrator/driver.py plan --repo . --artifacts "$ARTIFACTS" --issue "$ARTIFACTS/issue.json" --replan || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              uv run --no-sync python workflow/orchestrator/driver.py build --repo . --artifacts "$ARTIFACTS" || rc=$?
+            fi
+          fi
+          exit "$rc"
+
+      - name: Summary of the stages
+        if: always()
+        run: |
+          {
+            echo "### AutoSE stages 1-4"
+            echo '```json'
+            cat "$ARTIFACTS/run_state.json" 2>/dev/null || echo '{}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts (spec, design, diff, test report, state, token usage)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autose-artifacts
+          path: ${{ runner.temp }}/artifacts
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------ stage 5
+  release:
+    name: Stage 5 (branch, pull request, CI)
+    needs: agents
+    if: ${{ needs.agents.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # Only job that writes to GitHub. No model keys here, no agent code runs here.
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write          # to start the project's CI on the new branch
+
+    env:
+      ARTIFACTS: ${{ runner.temp }}/artifacts
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      RUN_ID: ${{ github.run_id }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: autose-artifacts
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Push the branch, open the pull request, wait for CI
+        run: >-
+          python3 workflow/orchestrator/release.py pr
+          --artifacts "$ARTIFACTS" --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
+
+      - name: Upload pr.md, link and CI result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autose-release
+          path: |
+            ${{ runner.temp }}/artifacts/pr.md
+            ${{ runner.temp }}/artifacts/pr_link.txt
+            ${{ runner.temp }}/artifacts/ci.json
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------ status comment
+  finish:
+    name: Post the run status on the issue
+    needs: [gate, agents, release]
+    if: ${{ always() && needs.gate.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+
+    env:
+      ARTIFACTS: ${{ runner.temp }}/artifacts
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      RESULTS: "agents=${{ needs.agents.result }}, release=${{ needs.release.result }}"
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: autose-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Comment on the issue
+        run: >-
+          python3 workflow/orchestrator/release.py comment
+          --artifacts "$ARTIFACTS" --issue-number "$ISSUE_NUMBER"
