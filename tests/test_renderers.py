@@ -410,3 +410,17 @@ class TestMarkdownRendererPlugins(TestCase):
             ],
         }
         self.assertEqual(renderer.render_token(token, BlockState()), "- x\n\n")
+
+
+def test_external_links_option():
+    import mistune
+    from mistune import HTMLRenderer
+
+    def md(**kw):
+        return mistune.create_markdown(renderer=HTMLRenderer(escape=False, **kw))
+
+    assert md()("[x](https://e.com)").strip() == '<p><a href="https://e.com">x</a></p>'
+    out = md(external_links=True)("[x](https://e.com)")
+    assert 'target="_blank"' in out and 'rel="nofollow noopener"' in out
+    out = md(external_links=True)("[x](#top) [y](/docs/page)")
+    assert "target=" not in out and "rel=" not in out
