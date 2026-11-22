@@ -152,7 +152,12 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
     # ---- stage 2: design
     design_prompt = read(WORKFLOW / "prompts" / "planner_design.md")
-    context = design_context(repo, spec_text)  # saves the planner most of its read calls and tokens
+    # Ready-made context saves the planner most of its read calls and tokens. Its size follows the
+    # provider's per-minute limit (Groq allows only 8K tokens a minute), keeping about a third of the
+    # window free for the model's answer and a couple of tool reads.
+    fixed_chars = len(design_prompt) + len(spec_text) + len(json.dumps(tools.schemas())) + 600
+    prompt_tokens = int(client.tpm * 0.7) - client.max_output_tokens
+    context = design_context(repo, spec_text, max_chars=max(1500, min(10_000, prompt_tokens * 3 - fixed_chars)))
     feedback = replan_note
     design_reasons: List[str] = []
     for attempt in range(1, PLAN_ATTEMPTS + 1):
@@ -182,11 +187,14 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return stop(artifacts, "design.md", read(artifacts / "design.md"), "2-design", design_reasons or ["no design saved"], state)
 
 
-def design_context(repo: Path, spec_text: str, max_files: int = 3) -> str:
+def design_context(repo: Path, spec_text: str, max_chars: int = 10_000, max_files: int = 3) -> str:
     """Ready-made context for the design stage: ARCHITECTURE.md and the few source files most related
     to the spec (ranked by rare words they share with it), shown as lists of definitions. All trusted
     repository text, chosen by plain code, so the planner rarely needs to explore (ADR-009: small budgets)."""
-    parts = ["ARCHITECTURE.md (trusted):\n" + read(repo / "ARCHITECTURE.md")[:7000]]
+    # Source definitions matter most for naming real functions, so ARCHITECTURE.md gets the smaller share.
+    arch_chars = max(800, int(max_chars * 0.3))
+    parts = ["ARCHITECTURE.md (trusted, shortened):\n" + read(repo / "ARCHITECTURE.md")[:arch_chars]]
+    remaining = max_chars - len(parts[0])
     files = sorted((repo / "src").rglob("*.py"))
     texts = {f: f.read_text(encoding="utf-8", errors="replace") for f in files}
     lowered = {f: t.lower() for f, t in texts.items()}
@@ -205,7 +213,12 @@ def design_context(repo: Path, spec_text: str, max_files: int = 3) -> str:
             for i, line in enumerate(texts[f].splitlines(), 1)
             if re.match(r"\s*(def|class)\s", line)
         ]
-        parts.append(f"Candidate file `{f.relative_to(repo).as_posix()}` (line: definition):\n" + "\n".join(defs[:60]))
+        block = f"Candidate file `{f.relative_to(repo).as_posix()}` (line: definition):\n" + "\n".join(defs[:60])
+        block = block[: max(0, remaining)]
+        if len(block) < 200:
+            break
+        parts.append(block)
+        remaining -= len(block)
     return "\n\n".join(parts)
 
 
