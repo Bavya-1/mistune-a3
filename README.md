@@ -1,3 +1,42 @@
+# AutoSE: an agentic issue-to-PR workflow (assignment A3)
+
+**Author:** Bavya Sri Kilari, MS by Research in CSE, roll number 2025701029 (course AutoSE, assignment A3).
+
+This is a fork of [lepture/mistune](https://github.com/lepture/mistune) pinned at commit
+`f7ec702` (fork: https://github.com/Bavya-1/mistune-a3). A GitHub Actions workflow takes an issue
+through six stages (spec, design, diff, tests, PR, review). A person decides whether to merge.
+
+**Status, honestly:** the gate, spec and design stages are implemented and have run for real. The
+builder and release code exists, but no real run has reached it; the reviewer has run on five seeded pull requests (see `results/runs.md`), because the free Groq model
+(gpt-oss-20b) often produced malformed tool calls. Every real run is listed in `results/runs.md`.
+
+## Models
+| Role | Provider / model |
+|---|---|
+| Planner (stages 1-2) | Groq `openai/gpt-oss-20b` (ADR-011) |
+| Builder (stages 3-4) | Groq `openai/gpt-oss-120b` |
+| Reviewer (stage 6) | Groq `qwen/qwen3.8-27b` |
+
+All free tiers. Keys are repository secrets (`GROQ_API_KEY`, optionally `GEMINI_API_KEY` and
+`AI_GATEWAY_API_KEY`). Model names are repository variables.
+
+## How to trigger
+Add the label `autose` to an issue, or comment `/autose` (owner, member or collaborator only).
+On a PR made by the workflow, `/autose` re-runs only the review. Follow a run in the Actions tab:
+the artifact `autose-artifacts` (spec.md, design.md, run_state.json, usage.jsonl) and the
+"AutoSE run finished" comment on the issue.
+
+## Where things are
+`architecture/` (views, ADR-001 to ADR-011), `workflow/` (workflow copy, driver, agents, prompts),
+`experiment/`, `results/`, `report.pdf`.
+
+## AI use
+Claude Code (Anthropic) helped write the workflow and agent code and drafts of the ADRs and report.
+The decisions, the runs, and the review of the generated code are the author's. A friend's Vercel
+gateway key was tried once and dropped (it needed a credit card).
+
+---
+
 <div align="center">
 
 <picture>
