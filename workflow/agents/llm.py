@@ -40,6 +40,14 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
         "tpm": 250_000,
         "rpm": 5,
     },
+    # Vercel AI Gateway: one OpenAI-compatible endpoint for many models (ids like "google/gemini-2.5-flash-lite").
+    # Added after a real run showed the direct Gemini model was closed to new accounts and its daily quota tiny.
+    "gateway": {
+        "url": "https://ai-gateway.vercel.sh/v1/chat/completions",
+        "key_env": "AI_GATEWAY_API_KEY",
+        "tpm": 250_000,
+        "rpm": 30,
+    },
 }
 
 CHARS_PER_TOKEN = 3.0  # deliberately pessimistic, so we over-estimate prompt size

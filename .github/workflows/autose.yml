@@ -84,10 +84,13 @@ jobs:
       contents: read
 
     env:
+      PLANNER_PROVIDER: ${{ vars.PLANNER_PROVIDER }}
       PLANNER_MODEL: ${{ vars.PLANNER_MODEL }}
+      BUILDER_PROVIDER: ${{ vars.BUILDER_PROVIDER }}
       BUILDER_MODEL: ${{ vars.BUILDER_MODEL }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
 
     steps:
       # The runner context is not allowed in job-level env, so the folder is set in a step.
@@ -231,8 +234,10 @@ jobs:
       verdict: ${{ steps.result.outputs.verdict }}
 
     env:
+      REVIEWER_PROVIDER: ${{ vars.REVIEWER_PROVIDER }}
       REVIEWER_MODEL: ${{ vars.REVIEWER_MODEL }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
 
     steps:
       - name: Set the output folder
@@ -301,10 +306,13 @@ jobs:
       contents: read
 
     env:
+      PLANNER_PROVIDER: ${{ vars.PLANNER_PROVIDER }}
       PLANNER_MODEL: ${{ vars.PLANNER_MODEL }}
+      BUILDER_PROVIDER: ${{ vars.BUILDER_PROVIDER }}
       BUILDER_MODEL: ${{ vars.BUILDER_MODEL }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
 
     steps:
       - name: Set the output folder
@@ -420,8 +428,10 @@ jobs:
       verdict: ${{ steps.result.outputs.verdict }}
 
     env:
+      REVIEWER_PROVIDER: ${{ vars.REVIEWER_PROVIDER }}
       REVIEWER_MODEL: ${{ vars.REVIEWER_MODEL }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
 
     steps:
       - name: Set the output folder
@@ -554,8 +564,10 @@ jobs:
       issues: read
 
     env:
+      REVIEWER_PROVIDER: ${{ vars.REVIEWER_PROVIDER }}
       REVIEWER_MODEL: ${{ vars.REVIEWER_MODEL }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
 
     steps:
       - name: Set the output folder
