@@ -108,6 +108,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     # ---- stage 1: requirements (the A1 skill). On a re-plan the approved spec is kept.
     skill = read(WORKFLOW / "SKILL.md")
     spec_text, ac_ids, feedback = "", [], ""
+    spec_reasons: List[str] = []
     replan_note = ""
     if args.replan:
         spec_text = read(artifacts / "spec.md")
@@ -130,6 +131,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         spec_text = read(artifacts / "spec.md")
         check = check_spec(spec_text) if spec_text else None
         if check is None:
+            spec_reasons = ["no spec saved" + (f" ({res.stopped}: {res.error})" if res.error else "")]
             feedback = "\n\nYou did not save spec.md. Call write_artifact with name spec.md."
             if res.stopped in ("budget", "prompt_too_large", "error"):
                 break
@@ -138,41 +140,73 @@ def cmd_plan(args: argparse.Namespace) -> int:
             ac_ids = check.data["ac_ids"]
             state.event("1-requirements", "passed", criteria=ac_ids)
             break
-        state.event("1-requirements", "check failed", reasons=check.reasons)
+        spec_reasons = check.reasons
+        state.event("1-requirements", "check failed", reasons=spec_reasons)
         if check.blocked:
-            return stop(artifacts, "spec.md", spec_text, "1-requirements", check.reasons, state)
-        feedback = "\n\nYour previous spec.md failed these checks, fix them:\n- " + "\n- ".join(check.reasons)
+            return stop(artifacts, "spec.md", spec_text, "1-requirements", spec_reasons, state)
+        feedback = "\n\nYour previous spec.md failed these checks, fix them:\n- " + "\n- ".join(spec_reasons)
     else:
-        return stop(artifacts, "spec.md", spec_text, "1-requirements", check.reasons if check else ["no spec saved"], state)
+        return stop(artifacts, "spec.md", spec_text, "1-requirements", spec_reasons or ["no spec saved"], state)
     if not ac_ids:
-        return stop(artifacts, "spec.md", spec_text, "1-requirements", ["no spec saved or budget used up"], state)
+        return stop(artifacts, "spec.md", spec_text, "1-requirements", spec_reasons or ["no spec saved"], state)
 
     # ---- stage 2: design
     design_prompt = read(WORKFLOW / "prompts" / "planner_design.md")
+    context = design_context(repo, spec_text)  # saves the planner most of its read calls and tokens
     feedback = replan_note
+    design_reasons: List[str] = []
     for attempt in range(1, PLAN_ATTEMPTS + 1):
         task = (
-            "Here is the approved spec.md (trusted):\n\n" + spec_text +
-            "\n\nWrite design.md now and save it with write_artifact." + feedback
+            "Here is the approved spec.md (trusted):\n\n" + spec_text + "\n\n" + context +
+            "\n\nThe candidate files above are usually enough: write design.md now and save it with "
+            "write_artifact. Use your read tools only if you must see a function body." + feedback
         )
         res = run_agent(client, design_prompt, task, tools, max_steps=7, stop_after="write_artifact")
         state.event("2-design", "attempt", n=attempt, agent=transcript_summary(res), error=res.error)
         design_text = read(artifacts / "design.md")
         if not design_text:
+            design_reasons = ["no design saved" + (f" ({res.stopped}: {res.error})" if res.error else "")]
             feedback = "\n\nYou did not save design.md. Call write_artifact with name design.md."
             if res.stopped in ("budget", "prompt_too_large", "error"):
                 break
             continue
-        check = check_design(design_text, str(repo), ac_ids)
-        if check.ok:
+        design_check = check_design(design_text, str(repo), ac_ids)
+        if design_check.ok:
             state.event("2-design", "passed")
             return 0
-        state.event("2-design", "check failed", reasons=check.reasons)
-        if check.blocked:
+        design_reasons = design_check.reasons
+        state.event("2-design", "check failed", reasons=design_reasons)
+        if design_check.blocked:
             break
-        feedback = "\n\nYour previous design.md failed these checks, fix them:\n- " + "\n- ".join(check.reasons)
-    reasons = check.reasons if "check" in locals() and check is not None else ["no design saved"]
-    return stop(artifacts, "design.md", read(artifacts / "design.md"), "2-design", reasons, state)
+        feedback = "\n\nYour previous design.md failed these checks, fix them:\n- " + "\n- ".join(design_reasons)
+    return stop(artifacts, "design.md", read(artifacts / "design.md"), "2-design", design_reasons or ["no design saved"], state)
+
+
+def design_context(repo: Path, spec_text: str, max_files: int = 3) -> str:
+    """Ready-made context for the design stage: ARCHITECTURE.md and the few source files most related
+    to the spec (ranked by rare words they share with it), shown as lists of definitions. All trusted
+    repository text, chosen by plain code, so the planner rarely needs to explore (ADR-009: small budgets)."""
+    parts = ["ARCHITECTURE.md (trusted):\n" + read(repo / "ARCHITECTURE.md")[:7000]]
+    files = sorted((repo / "src").rglob("*.py"))
+    texts = {f: f.read_text(encoding="utf-8", errors="replace") for f in files}
+    lowered = {f: t.lower() for f, t in texts.items()}
+    words = set(re.findall(r"[a-z_]{4,}", spec_text.lower()))
+    doc_freq = {w: sum(1 for t in lowered.values() if w in t) for w in words}
+    scored = sorted(
+        ((sum(1.0 / doc_freq[w] for w in words if doc_freq[w] and w in t), f) for f, t in lowered.items()),
+        key=lambda pair: pair[0],
+        reverse=True,
+    )
+    for score, f in scored[:max_files]:
+        if score <= 0:
+            continue
+        defs = [
+            f"{i}: {line.strip()}"
+            for i, line in enumerate(texts[f].splitlines(), 1)
+            if re.match(r"\s*(def|class)\s", line)
+        ]
+        parts.append(f"Candidate file `{f.relative_to(repo).as_posix()}` (line: definition):\n" + "\n".join(defs[:60]))
+    return "\n\n".join(parts)
 
 
 def stop(artifacts: Path, name: str, text: str, stage: str, reasons: List[str], state: State) -> int:
