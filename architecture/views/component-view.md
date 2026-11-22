@@ -32,7 +32,7 @@ by budgets (ADR-002, ADR-009).
 | Component | Stages | Tools | Model | Can write to GitHub? |
 | --- | --- | --- | --- | --- |
 | Gate job | trigger check | none | none | no |
-| Planner agent | 1 Requirements, 2 Design | read repo, write `spec.md` and `design.md` | Gemini (Flash-class) | no |
+| Planner agent | 1 Requirements, 2 Design | read repo, write `spec.md` and `design.md` | Groq `gpt-oss-20b` (was Gemini: ADR-011) | no |
 | Builder agent | 3 Implementation, 4 Testing | read, edit `src/` and `tests/`, run tests | Groq gpt-oss-120b | no |
 | Release step | 5 Release | `git push`, `gh pr create` (plain code) | none | yes |
 | Reviewer agent | 6 Review | read, run code and tests | Groq qwen3.8-27b (third family) | no (a separate posting step publishes the review) |

@@ -1,0 +1,47 @@
+diff --git a/src/mistune/renderers/html.py b/src/mistune/renderers/html.py
+index 09e7b04..92b0e7e 100644
+--- a/src/mistune/renderers/html.py
++++ b/src/mistune/renderers/html.py
+@@ -35,8 +35,10 @@ class HTMLRenderer(BaseRenderer):
+         self,
+         escape: bool = True,
+         allow_harmful_protocols: Optional[Union[bool, Iterable[str]]] = None,
++        external_links: bool = True,
+     ) -> None:
+         super(HTMLRenderer, self).__init__()
++        self._external_links = external_links
+         self._allow_harmful_protocols = allow_harmful_protocols
+         self._escape = escape
+ 
+@@ -127,6 +129,9 @@ class HTMLRenderer(BaseRenderer):
+         attrs: Dict[str, object] = {"href": self.sanitize_url(url)}
+         if title:
+             attrs["title"] = title
++        if self._external_links and url.startswith(("http://", "https://")):
++            attrs["target"] = "_blank"
++            attrs["rel"] = "nofollow noopener"
+         return "<a" + self.render_attrs(attrs) + ">" + text + "</a>"
+ 
+     def image(self, text: str, url: str, title: Optional[str] = None) -> str:
+diff --git a/tests/test_renderers.py b/tests/test_renderers.py
+index 15a922f..ab84fad 100644
+--- a/tests/test_renderers.py
++++ b/tests/test_renderers.py
+@@ -410,3 +410,17 @@ class TestMarkdownRendererPlugins(TestCase):
+             ],
+         }
+         self.assertEqual(renderer.render_token(token, BlockState()), "- x\n\n")
++
++
++def test_external_links_option():
++    import mistune
++    from mistune import HTMLRenderer
++
++    def md(**kw):
++        return mistune.create_markdown(renderer=HTMLRenderer(escape=False, **kw))
++
++    assert md()("[x](https://e.com)").strip() == '<p><a href="https://e.com">x</a></p>'
++    out = md(external_links=True)("[x](https://e.com)")
++    assert 'target="_blank"' in out and 'rel="nofollow noopener"' in out
++    out = md(external_links=True)("[x](#top) [y](/docs/page)")
++    assert "target=" not in out and "rel=" not in out
